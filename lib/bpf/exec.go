@@ -45,51 +45,51 @@ type execveEvent struct {
 	ReturnCode int32
 
 	// CgroupID is the internal cgroupv2 ID of the event.
-	CgroupID uint64
+	CgroupID uint32
 }
 
-type Program struct {
+type exec struct {
 	closeContext context.Context
 
 	perfMap *bcc.PerfMap
 	module  *bcc.Module
 }
 
-func New(closeContext context.Context) *Program {
-	return &Program{
+func newExec(closeContext context.Context) *exec {
+	return &exec{
 		closeContext: closeContext,
 	}
 }
 
-func (p *Program) Start() error {
-	p.module = bcc.NewModule(execveSource, []string{})
+func (e *exec) Start() error {
+	e.module = bcc.NewModule(execveSource, []string{})
 
 	fnName := bcc.GetSyscallFnName("execve")
 
-	kprobe, err := p.module.LoadKprobe("syscall__execve")
+	kprobe, err := e.module.LoadKprobe("syscall__execve")
 	if err != nil {
 		return trace.Wrap(err)
 	}
 
 	// passing -1 for maxActive signifies to use the default
 	// according to the kernel kprobes documentation
-	if err := p.module.AttachKprobe(fnName, kprobe, -1); err != nil {
+	if err := e.module.AttachKprobe(fnName, kprobe, -1); err != nil {
 		return trace.Wrap(err)
 	}
 
-	kretprobe, err := p.module.LoadKprobe("do_ret_sys_execve")
+	kretprobe, err := e.module.LoadKprobe("do_ret_sys_execve")
 	if err != nil {
 		return trace.Wrap(err)
 	}
 
 	// passing -1 for maxActive signifies to use the default
 	// according to the kernel kretprobes documentation
-	if err := p.module.AttachKretprobe(fnName, kretprobe, -1); err != nil {
+	if err := e.module.AttachKretprobe(fnName, kretprobe, -1); err != nil {
 		return trace.Wrap(err)
 	}
 
 	eventCh := make(chan []byte, 1024)
-	table := bcc.NewTable(p.module.TableId("events"), p.module)
+	table := bcc.NewTable(e.module.TableId("events"), e.module)
 
 	perfMap, err := bcc.InitPerfMap(table, eventCh)
 	if err != nil {
@@ -97,12 +97,12 @@ func (p *Program) Start() error {
 	}
 	perfMap.Start()
 
-	go p.start(eventCh)
+	go e.start(eventCh)
 
 	return nil
 }
 
-func (p *Program) start(eventCh <-chan []byte) {
+func (e *exec) start(eventCh <-chan []byte) {
 	// TODO(russjones): Replace with ttlmap.
 	args := make(map[uint64][]string)
 
@@ -118,14 +118,14 @@ func (p *Program) start(eventCh <-chan []byte) {
 			}
 
 			if eventArg == event.Type {
-				e, ok := args[event.PID]
+				buf, ok := args[event.PID]
 				if !ok {
-					e = make([]string, 0)
+					buf = make([]string, 0)
 				}
 
 				argv := (*C.char)(unsafe.Pointer(&event.Argv))
-				e = append(e, C.GoString(argv))
-				args[event.PID] = e
+				buf = append(buf, C.GoString(argv))
+				args[event.PID] = buf
 			} else {
 				// The args should have come in a previous event, find them by PID.
 				argv, ok := args[event.PID]
@@ -137,7 +137,7 @@ func (p *Program) start(eventCh <-chan []byte) {
 				// Convert C string that holds the command name into a Go string.
 				command := C.GoString((*C.char)(unsafe.Pointer(&event.Command)))
 
-				fmt.Printf("--> CgroupID=%v PID=%v PPID=%v Command=%v, Args=%v, ReturnCode=%v.\n",
+				fmt.Printf("--> Event=exec CgroupID=%v PID=%v PPID=%v Command=%v, Args=%v, ReturnCode=%v.\n",
 					event.CgroupID, event.PID, event.PPID, command, argv, event.ReturnCode)
 			}
 		}
@@ -145,9 +145,9 @@ func (p *Program) start(eventCh <-chan []byte) {
 }
 
 // TODO(russjones): Make sure this program is actually unloaded upon exit.
-func (p *Program) Close() {
-	p.perfMap.Stop()
-	p.module.Close()
+func (e *exec) Close() {
+	e.perfMap.Stop()
+	e.module.Close()
 }
 
 const execveSource string = `
